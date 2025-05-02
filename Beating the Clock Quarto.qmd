@@ -1,0 +1,919 @@
+---
+title: "Beating the Clock, A Predictive Approach to First Responder Response Time"
+author: "Samantha Doyle & Alyssa Holmes"
+format: html
+code-overflow: wrap
+editor: visual
+---
+
+## Data Preparation
+
+### Data Extraction
+
+This data was sourced from *NYC Open Data*.
+
+```{r}
+# install.packages("readxl")
+library(readxl)
+
+# Import data
+responder <- read.csv('End_to_end_911.csv')
+head(responder)
+attach(responder)
+```
+
+### Data Cleaning
+
+The original dataset contains one date variable, two categorical variables, and twenty-seven numeric variables. All the numeric variables are measured in seconds except for X..of.Incidents.Calculated which counts the number of incidents in a given month. The two categorical variables are agency, which states the department of the emergency service, and Final.Incident.Type, which states the final incident category. Twelve numeric variables were department specific (i.e. Fire Department) measurements. Since the goal of this model is to predict emergency services as a whole, these variables were removed. A few of the remaining numeric columns had a singular missing value, which was imputed with the mean. A unique ID variable was created for each observation, as well. From the date variable, the month was extracted and sorted into categories by season (three months for spring, summer, fall, and winter each) to obtain another categorical variable. Finally, the missing values in Final.Incident.Type were imputed with the mode, and the 23 categories in this variable were condensed into a new categorical variable called IncidentClassification. 
+
+```{r}
+# Remove unwanted variables
+responder_clean <- subset(
+  responder,
+  select = -c(
+    Call.to.FDNY.Job.Creation,
+    Call.to.FDNY.Pickup,
+    Call.to.EMS.Pickup,
+    Call.to.Agency.Job.Creation,
+    Median.FDNY.Pickup,
+    Median.FDNY.Job.Creation,
+    Median.Ems.Pickup,
+    Median.Ems.Job.Creation,
+    Average.EMS.Pickup,
+    Average.EMS.Processing,
+    Average.FD.Processing,
+    Average.FD.Pickup
+  )
+)
+
+head(responder_clean)
+summary(responder_clean)
+
+# Find columns with missing values
+colSums(is.na(responder_clean))
+
+# Replace Average.Calltaker.Processing NA with column mean
+responder_clean$Average.Calltaker.Processing[is.na(responder_clean$Average.Calltaker.Processing)] <-
+  mean(responder_clean$Average.Calltaker.Processing, na.rm = TRUE)
+
+# Replace Average.Dispatch NA with column mean
+responder_clean$Average.Dispatch[is.na(responder_clean$Average.Dispatch)] <-
+  mean(responder_clean$Average.Dispatch, na.rm = TRUE)
+
+# Replace Median.Dispatch NA with column mean
+responder_clean$Median.Dispatch[is.na(responder_clean$Median.Dispatch)] <-
+  mean(responder_clean$Median.Dispatch, na.rm = TRUE)
+
+# Replace Median.Calltaker.Handoff NA with column mean
+responder_clean$Median.Calltaker.Handoff[is.na(responder_clean$Median.Calltaker.Handoff)] <-
+  mean(responder_clean$Median.Calltaker.Handoff, na.rm = TRUE)
+
+# Replace Call.to.PD.Calltaker.Handoff NA with column mean
+responder_clean$Call.to.PD.Calltaker.Handoff[is.na(responder_clean$Call.to.PD.Calltaker.Handoff)] <-
+  mean(responder_clean$Call.to.PD.Calltaker.Handoff, na.rm = TRUE)
+
+# Recheck missing values
+colSums(is.na(responder_clean))
+
+# Create the ID variable
+responder_clean$ID <- 1:nrow(responder_clean)
+
+# Reorder the columns to place 'ID' at the beginning
+responder_clean <- 
+  responder_clean[, c("ID", setdiff(names(responder_clean), "ID"))]
+
+# View the first few rows to check the result
+head(responder_clean)
+
+# Convert Week.Start.Date to Date format 
+responder_clean$Week.Start.Date <- 
+  as.Date(responder_clean$Week.Start.Date, format = "%m/%d/%Y")
+
+# Create a new column for Season
+responder_clean$Season <- ifelse(
+  format(responder_clean$Week.Start.Date, "%m") %in% c("12", "01", "02"),
+  "Winter",
+  ifelse(
+    format(responder_clean$Week.Start.Date, "%m") %in% c("03", "04", "05"),
+    "Spring",
+    ifelse(
+      format(responder_clean$Week.Start.Date, "%m") %in% c("06", "07", "08"),
+      "Summer",
+      "Fall"  
+    )
+  )
+)
+
+
+# Reorder columns
+responder_clean <- responder_clean[, c("ID", "Week.Start.Date", "Season", 
+                                       setdiff(names(responder_clean), 
+                                               c("ID", "Week.Start.Date", 
+                                                 "Season")))]
+# View data
+head(responder_clean)
+
+# Check for empty strings or zero-length entries
+colSums(responder_clean == "")
+
+# Convert empty strings to NA
+responder_clean[responder_clean == ""] <- NA
+
+# install.packages("dyplr")
+library(dplyr)
+
+# Reduce factor levels for Final.Incident.Type
+responder_clean <- responder_clean %>%
+  mutate(
+    IncidentClassification = case_when(
+      Final.Incident.Type %in% c(
+        "1. Critical",
+        "1. Life Threatening Med Emergencies",
+        "1. Structural Fires"
+      ) ~ "Critical",
+      Final.Incident.Type %in% c(
+        "2. Non-Life Threatening Med Emergencies",
+        "2. Serious",
+        "2. Non-Structural Fires"
+      ) ~ "Serious",
+      Final.Incident.Type %in% c("3. Medical Emergencies", "3. Non-Critical") ~
+        "Non-Critical",
+      Final.Incident.Type %in% c("4. Non-Medical Emergencies") ~ "Other",
+      Final.Incident.Type %in% c("Alarms", "Shot Spotter") ~ "Alert",
+      Final.Incident.Type %in% c("Disorderly", "Disorderly Person/Group/Noise",
+                                 "Dispute") ~ "Dispute",
+      Final.Incident.Type %in% c(
+        "Hazardous Materials/Suspicious Letters/Packages/Substances/Substances",
+        "United States Postal Service - Bio Hazard Detection System"
+      ) ~ "Hazard",
+      Final.Incident.Type %in% c(
+        "Investigate/Possible Crime",
+        "Other Crimes (In Progress)",
+        "Possible Crimes"
+      ) ~ "Possible Crime",
+      Final.Incident.Type %in% c("Past Crime") ~ "Past Crime",
+      Final.Incident.Type %in% c("Vehicle Accident") ~ "Vehicle Accident",
+      TRUE ~ "Other",
+      # If Incident.Type is NA, assign "Other"
+    )
+  )
+```
+
+## Exploratory Data Analysis
+
+```{r}
+# Reproducibility
+set.seed(1)
+
+# Make Train and Test using 80/20 split
+sample <- sample(c(TRUE, FALSE), nrow(responder_clean),
+                 replace=TRUE, prob=c(0.8,0.2))
+train  <- responder_clean[sample, ]
+test   <- responder_clean[!sample, ]
+
+# Duplicate train data for further pre-processing
+explore<- train
+
+# Create histogram for target variable
+hist(Call.to.Agency.Arrival, 
+     main = "Histogram of Call to Agency Arrival", 
+     xlab = "Call to Agency Arrival", 
+     col = "purple", 
+     border = "black")
+
+##################################################
+# The target variable is skewed right, indicating#
+# the potential for log transformation           #
+##################################################
+
+# Create a new variable that is the log of 'Call.to.Agency.Arrival'
+explore$Log.Call.to.Agency.Arrival <- 
+  log(explore$Call.to.Agency.Arrival)
+
+# Check the result by viewing the first few rows
+head(explore[, c("Call.to.Agency.Arrival", "Log.Call.to.Agency.Arrival")])
+
+# Check for NA values in the log-transformed column
+sum(is.na(explore$Log.Call.to.Agency.Arrival))
+
+# Check for NA values in the entire data frame
+sum(is.na(explore))
+
+# Histogram for log transformed target variable
+hist(explore$Log.Call.to.Agency.Arrival, 
+     main = "Histogram of Log (Call to Agency Arrival)", 
+     xlab = "Call to Agency Arrival", 
+     col = "purple", 
+     border = "black")
+
+# correlation matrix with log target variable
+cor_matrix_log <- cor(explore[,sapply(explore,is.numeric)])
+
+
+# install.packages("corrplot")
+library(corrplot)
+
+# Save the plot with larger dimensions
+png("corrplot_log.png", width = 4000, height = 3200)  
+corrplot(cor_matrix_log, method = "color", type = "upper", 
+         addCoef.col = "black",  
+         number.cex = 4,      
+         tl.cex = 4)           
+# Close the plotting device
+dev.off()  
+
+# Define the dataset variables (excluding the first three)
+variables <- c(
+  "X..of.Incidents.Calculated",
+  "Call.to.First.Pickup",
+  "Call.to.PD.Calltaker.Handoff",
+  "Call.to.Agency.Dispatch",
+  "Call.to.Agency.Arrival",
+  "Call.to.First.Arrival..Multi.Agency.Incidents.",
+  "Median.Pickup",
+  "Median.Calltaker.Handoff",
+  "Median.Dispatch",
+  "Median.Travel",
+  "Median.Cumulative.First.Arrival...Multi.Agency.Incidents.",
+  "Average.Travel",
+  "Average.Dispatch",
+  "Average.Calltaker.Processing",
+  "Average.Pickup",
+  "Log.Call.to.Agency.Arrival"
+)
+
+# Loop through the variables and plot histograms for each variable
+for (var in variables) {
+  hist(explore[[var]], 
+       main = paste("Histogram of", var), 
+       xlab = var, 
+       col = "purple", 
+       border = "black")
+}
+
+##############################################
+# Most variables are skewed right, indicating#
+# the potential for log transformation       #
+##############################################
+
+# Define the dataset variables
+log_variables <- c(
+  "X..of.Incidents.Calculated",
+  "Call.to.First.Pickup",
+  "Call.to.PD.Calltaker.Handoff",
+  "Call.to.Agency.Dispatch",
+  "Call.to.Agency.Arrival",
+  "Call.to.First.Arrival..Multi.Agency.Incidents.",
+  "Median.Pickup",
+  "Median.Calltaker.Handoff",
+  "Median.Dispatch",
+  "Median.Travel",
+  "Median.Cumulative.First.Arrival...Multi.Agency.Incidents.",
+  "Average.Travel",
+  "Average.Dispatch",
+  "Average.Calltaker.Processing",
+  "Average.Pickup"
+)
+
+# Loop through the variables, take the log, and plot histograms
+# Adding 1 to avoid log(0)
+for (var in log_variables) {
+  log_var <- log(explore[[var]] + 1)  
+  
+  # Create the histogram for the log-transformed variable
+  hist(log_var, 
+       main = paste("Histogram of Log", var), 
+       xlab = paste("Log of", var), 
+       col = "purple", 
+       border = "black")
+}
+
+# Side-by-side boxplot of the log-transformed variable by Season
+boxplot(Log.Call.to.Agency.Arrival ~ Season, 
+        data = explore, 
+        main = "Side-by-Side Boxplot by Season", 
+        xlab = "Season", 
+        ylab = "Log of Call to Agency Arrival",  
+        col = "purple", 
+        border = "black")
+
+# Side-by-side boxplot of the log-transformed variable by Agency
+boxplot(Log.Call.to.Agency.Arrival ~ Agency, 
+        data = explore, 
+        main = "Side-by-Side Boxplot by Agency", 
+        xlab = "Agency", 
+        ylab = "Log of Call to Agency Arrival",  
+        col = "purple", 
+        border = "black")
+
+# Side-by-side boxplot of the log-transformed variable by Incident
+boxplot(Log.Call.to.Agency.Arrival ~ IncidentClassification, 
+        data = explore, 
+        main = "Side-by-Side Boxplot by Incident Classification", 
+        xlab = "Incident Classification", 
+        ylab = "Log of Call to Agency Arrival", 
+        col = "purple", 
+        border = "black")
+
+# ANOVA for Incident Classification
+IC_Anova <- aov(Call.to.Agency.Arrival~IncidentClassification, data=train)
+summary(IC_Anova)
+
+IC_ttest<- TukeyHSD(IC_Anova)
+IC_ttest
+
+# ANOVA for Agency
+Agency_Anova <- aov(Call.to.Agency.Arrival~Agency, data=train)
+summary(Agency_Anova)
+
+Agency_ttest<- TukeyHSD(Agency_Anova)
+Agency_ttest
+
+# List of variables to be log-transformed 
+log_variables <- c(
+  "X..of.Incidents.Calculated",
+  "Call.to.First.Pickup",
+  "Call.to.PD.Calltaker.Handoff",
+  "Call.to.Agency.Dispatch",
+  "Call.to.First.Arrival..Multi.Agency.Incidents.",
+  "Median.Pickup",
+  "Median.Calltaker.Handoff",
+  "Median.Dispatch",
+  "Median.Travel",
+  "Median.Cumulative.First.Arrival...Multi.Agency.Incidents.",
+  "Average.Travel",
+  "Average.Dispatch",
+  "Average.Calltaker.Processing",
+  "Average.Pickup"
+)
+
+# Subset the data to include only numeric variables
+log_data <- explore[, log_variables]
+
+# Replace zero or negative values with 0.0001
+log_data[log_data <= 0] <- 0.0001
+
+# Log-transform the selected variables, adding 1 to avoid log(0)
+log_data_transformed <- log(log_data + 1)
+
+# Add the already log-transformed 'Log.Call.to.Agency.Arrival'
+log_data_transformed$Log.Call.to.Agency.Arrival <- 
+  explore$Log.Call.to.Agency.Arrival
+
+# Numeric columns only
+log_data_numeric <- 
+  log_data_transformed[, sapply(log_data_transformed, is.numeric)]
+
+# Create the correlation matrix
+cor_matrix_log <- cor(log_data_numeric, use = "complete.obs")
+
+# Save the plot with larger dimensions
+png("corrplot_large_log.png", width = 4000, height = 3200)
+
+# Generate the correlation plot
+corrplot(cor_matrix_log, method = "color", type = "upper", 
+         addCoef.col = "black", 
+         number.cex = 4,         
+         tl.cex = 4)             
+
+dev.off()
+
+
+##############################################
+# Variables seem to be influenced by extreme #
+# outliers; attempting winsorization         #
+##############################################
+
+# install.packages("ggplot2")
+# install.packages("reshape2")
+library(ggplot2)
+library(reshape2)
+
+# List of variables to winsorize
+variables <- c( "X..of.Incidents.Calculated",
+                "Call.to.First.Pickup",
+                "Call.to.PD.Calltaker.Handoff",
+                "Log.Call.to.Agency.Arrival",
+                "Call.to.Agency.Dispatch",
+                "Call.to.First.Arrival..Multi.Agency.Incidents.",
+                "Median.Pickup",
+                "Median.Calltaker.Handoff",
+                "Median.Dispatch",
+                "Median.Travel",
+                "Median.Cumulative.First.Arrival...Multi.Agency.Incidents.",
+                "Average.Travel",
+                "Average.Dispatch",
+                "Average.Calltaker.Processing",
+                "Average.Pickup")
+
+# Plot boxplots for all variables
+explore_long <- log_data_transformed[variables] 
+
+# Reshape data to long format for ggplot
+explore_long <- melt(explore_long)  
+
+ggplot(explore_long, aes(x = variable, y = value)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Boxplots Before Winsorization", x = "Variables", y = "Values")
+
+# Winsorization function
+winsorize <- function(x, lower_percent = 0.01, upper_percent = 0.99) {
+  lower_limit <- quantile(x, lower_percent)
+  upper_limit <- quantile(x, upper_percent)
+  x[x < lower_limit] <- lower_limit
+  x[x > upper_limit] <- upper_limit
+  return(x)
+}
+
+# Apply winsorization to all variables
+log_data_transformed[variables] <- lapply(log_data_transformed[variables],
+                                          winsorize)
+
+# Reshape data again for plotting
+explore_long_winsorized <- log_data_transformed[variables]
+explore_long_winsorized <- melt(explore_long_winsorized)
+
+# Plot boxplots after winsorization
+ggplot(explore_long_winsorized, aes(x = variable, y = value)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Boxplots After Winsorization", x = "Variables", y = "Values")
+```
+
+## Model Creation
+
+### MLR Model
+
+First, a standard MLR was created. Assumptions like normality and homosceadacity were tested. Unfortunately, this model did not pass the assumptions.
+
+```{r}
+# MLR Model
+responder_MLR <- lm(
+  Log.Call.to.Agency.Arrival ~
+    X..of.Incidents.Calculated + Call.to.First.Pickup +
+    Call.to.PD.Calltaker.Handoff + Call.to.Agency.Dispatch +
+    Call.to.First.Arrival..Multi.Agency.Incidents. + Median.Pickup +
+    Median.Calltaker.Handoff + Median.Dispatch + Median.Travel +
+    Median.Cumulative.First.Arrival...Multi.Agency.Incidents. +
+    Average.Travel + Average.Dispatch + Average.Calltaker.Processing +
+    Average.Pickup + as.factor(Agency) + as.factor(IncidentClassification),
+  data = explore
+)
+
+summary(responder_MLR)
+
+# Assumption checking
+plot(responder_MLR, which=1)
+plot(responder_MLR, which=2)
+
+# install.packages("lmtest")
+library(lmtest)
+
+# Breusch-Pagan (BP) test for heteroscedasticity
+bptest(responder_MLR)
+
+# Kolmogorov-Smirnov (KS) Test for normality of residuals
+ks.test(residuals(responder_MLR), "pnorm", 
+        mean = mean(residuals(responder_MLR)), 
+        sd = sd(residuals(responder_MLR)))
+
+##############################################
+# Model did not pass; running model with     #
+# log transformation                         #
+##############################################
+```
+
+### Log Transformed MLR
+
+Next, an MLR model was created using the log transformed variables. Assumptions were also checked for this model, but still it didn't pass.
+
+```{r}
+# Add categorical variables to the log transformed data
+log_data_all <- log_data_transformed %>%
+  mutate(Agency = explore$Agency,
+         IncidentClassification = explore$IncidentClassification)
+
+# MLR model with log transformed variables
+responder_MLR_log <- lm(
+  Log.Call.to.Agency.Arrival ~
+    X..of.Incidents.Calculated + Call.to.First.Pickup +
+    Call.to.PD.Calltaker.Handoff + Call.to.Agency.Dispatch +
+    Call.to.First.Arrival..Multi.Agency.Incidents. + Median.Pickup +
+    Median.Calltaker.Handoff + Median.Dispatch + Median.Travel +
+    Median.Cumulative.First.Arrival...Multi.Agency.Incidents. +
+    Average.Travel + Average.Dispatch + Average.Calltaker.Processing +
+    Average.Pickup + as.factor(Agency) + as.factor(IncidentClassification),
+  data = log_data_all
+)
+
+summary(responder_MLR_log)
+
+# Assumption checking
+bptest(responder_MLR_log)
+
+ks.test(residuals(responder_MLR_log), "pnorm", 
+        mean = mean(residuals(responder_MLR_log)), 
+        sd = sd(residuals(responder_MLR_log)))
+
+##############################################
+# Model did not pass; running model with     #
+# BoxCox transformation                      #
+##############################################
+```
+
+### BoxCox Transformed MLR
+
+Since the models were not passing the KS test, a BoxCox transformation was attempted.
+
+```{r}
+library(MASS)
+
+# Apply BoxCox Transformation
+boxcox_results <- boxcox(responder_MLR_log, lambda = seq(-2, 2, by = 0.1))
+
+# Identify the best lambda value
+lambda_best <- boxcox_results$x[which.max(boxcox_results$y)]
+lambda_best
+
+# Apply transformation to the response variable only
+if (lambda_best > 0) {
+  responder_clean$Transformed.Call.to.Agency.Arrival <- 
+    (responder_clean$Call.to.Agency.Arrival ^ lambda_best - 1) / lambda_best
+} else if (lambda_best == 0) {
+  responder_clean$Transformed.Call.to.Agency.Arrival <- 
+    log(responder_clean$Call.to.Agency.Arrival)
+} else {
+  responder_clean$Transformed.Call.to.Agency.Arrival <- 
+    -1 / (responder_clean$Call.to.Agency.Arrival ^ lambda_best)
+}
+
+# MLR model with BoxCox-transformed response
+responder_MLR_boxcox <- lm(
+  Transformed.Call.to.Agency.Arrival ~
+    X..of.Incidents.Calculated + Call.to.First.Pickup +
+    Call.to.PD.Calltaker.Handoff + Call.to.Agency.Dispatch +
+    Call.to.First.Arrival..Multi.Agency.Incidents. + Median.Pickup +
+    Median.Calltaker.Handoff + Median.Dispatch + Median.Travel +
+    Median.Cumulative.First.Arrival...Multi.Agency.Incidents. +
+    Average.Travel + Average.Dispatch + Average.Calltaker.Processing +
+    Average.Pickup + as.factor(Agency) + as.factor(IncidentClassification),
+  data = responder_clean
+)
+
+summary(responder_MLR_boxcox)
+
+# Assumption checking
+bptest(responder_MLR_boxcox)
+
+ks.test(residuals(responder_MLR_boxcox), "pnorm", 
+        mean = mean(residuals(responder_MLR_boxcox)), 
+        sd = sd(residuals(responder_MLR_boxcox)))
+
+##############################################
+# Model did not pass; running model with     #
+# Winsorizing transformation                 #
+##############################################
+```
+
+### Winsorized Model
+
+After viewing the residual vs fitted plots and seeing the potential for outliers, a model was created using the winsorized data set.
+
+```{r}
+# MLR Model after Winsorization
+responder_MLR_winz <- lm(Log.Call.to.Agency.Arrival ~ 
+                       X..of.Incidents.Calculated+
+                       Call.to.First.Pickup+
+                       Call.to.PD.Calltaker.Handoff+
+                       Call.to.Agency.Dispatch+
+                       Call.to.First.Arrival..Multi.Agency.Incidents.+
+                       Median.Pickup+
+                       Median.Calltaker.Handoff+
+                       Median.Dispatch+
+                       Median.Travel+
+                       Median.Cumulative.First.Arrival...Multi.Agency.Incidents.+
+                       Average.Travel+
+                       Average.Dispatch+
+                       Average.Calltaker.Processing+
+                       Average.Pickup,
+                     data = log_data_transformed[variables])
+summary(responder_MLR_winz)
+
+# Assumption checking
+bptest(responder_MLR_winz)
+
+ks.test(residuals(responder_MLR_winz), "pnorm", 
+        mean = mean(residuals(responder_MLR_winz)), 
+        sd = sd(residuals(responder_MLR_winz)))
+
+
+##############################################
+# Model did not pass after winsorizing data; #
+# checking now for multicollinearity         #
+##############################################
+```
+
+### Addressing Multicollinearity
+
+At this point, the models continue to fail the assumption check so multicollinearity was examined.
+
+```{r}
+# Assess multicollinearity 
+eigen(cor(log_data_numeric))$values
+max(eigen(cor(log_data_numeric))$values)/min(eigen(cor(log_data_numeric))$values)
+kappa(cor(log_data_numeric), exact = TRUE)
+
+model <- lm(Log.Call.to.Agency.Arrival~., data = log_data_numeric)
+
+# install.packages("car")
+library(car)
+
+# Assess variance inflation factor
+vif(model) 
+mean(vif(model))
+
+# Remove variables with VIF greater than 55 and refit the model
+vif_MLR <- lm(Log.Call.to.Agency.Arrival ~ 
+                X..of.Incidents.Calculated + Call.to.First.Pickup + 
+                Median.Pickup + Average.Pickup+ Median.Calltaker.Handoff+
+                Median.Dispatch+ Call.to.PD.Calltaker.Handoff+Median.Travel+
+                Median.Cumulative.First.Arrival...Multi.Agency.Incidents.,
+              data = log_data_numeric)
+summary(vif_MLR)
+
+vif(vif_MLR)
+
+# Assumption checking
+bptest(vif_MLR)
+
+ks.test(residuals(vif_MLR), "pnorm", 
+        mean = mean(residuals(vif_MLR)), 
+        sd = sd(residuals(vif_MLR)))
+
+##############################################
+# Model did not pass with log transformation;#
+# attempting GLM with gamma distribution and #
+# log link                                   #
+##############################################
+```
+
+### Gamma Distributed GLM
+
+After considering that the MLR is not able to work for the data, a new approach, a Generalized Linear Model with a Gamma distribution and log link, was taken.
+
+```{r}
+# Gamma general linear model
+glm_gamma <- glm(
+  Call.to.Agency.Arrival ~ X..of.Incidents.Calculated + 
+    Call.to.First.Pickup + Call.to.PD.Calltaker.Handoff + 
+    Call.to.Agency.Dispatch +
+    Median.Pickup +
+    Median.Calltaker.Handoff + Median.Dispatch +
+    Average.Calltaker.Processing +
+    as.factor(Agency),
+  data = train,
+  family = Gamma(link = "log")
+)
+
+summary(glm_gamma)
+
+# Assumption checking
+bptest(glm_gamma)
+
+ks.test(residuals(glm_gamma), "pnorm", 
+        mean = mean(residuals(glm_gamma)), 
+        sd = sd(residuals(glm_gamma)))
+
+# Residuals vs Fitted Values (Homoscedasticity & Linearity)
+plot(glm_gamma, which = 1)
+
+# Normal Q-Q Plot (Normality of residuals)
+plot(glm_gamma, which = 2)
+```
+
+### Ridge & LASSO Regression Model
+
+To compare the GLM model created with other models, Ridge and LASSO regression models were generated.
+
+```{r}
+# install.packages("glmnet")
+library(glmnet)
+
+# RIDGE
+y <- train$Call.to.Agency.Arrival
+train_matrix <- as.matrix(train[, c(
+  "X..of.Incidents.Calculated",
+  "Call.to.First.Pickup",
+  "Call.to.PD.Calltaker.Handoff",
+  "Call.to.Agency.Dispatch",
+  "Median.Pickup",
+  "Median.Calltaker.Handoff",
+  "Median.Dispatch",
+  "Average.Calltaker.Processing"
+)])
+
+# Dummy code variables & split
+dummy_agency <- model.matrix(~ Agency - 1, data = responder_clean)
+sample2 <- sample(c(TRUE, FALSE), nrow(dummy_agency),
+                  replace=TRUE, prob=c(0.8,0.2))
+dummy_train <- dummy_agency[sample, ]
+dummy_test <- dummy_agency[!sample, ]
+
+# Combine dummy and numeric variables
+X <- cbind(train_matrix, dummy_train)
+
+# Fit a Ridge regression model
+ridge_model <- glmnet(X, y, alpha = 0, lambda = 0.1)
+coef(ridge_model)
+
+# Perform cross-validation to select lambda
+cv_ridge <- cv.glmnet(X, y, alpha = 0)
+plot(cv_ridge$glmnet.fit, xvar = "lambda", label = TRUE)
+
+best_lambda_ridge <- cv_ridge$lambda.min
+ridge_model_best <- glmnet(X, y, alpha = 0, lambda = best_lambda_ridge)
+coef(ridge_model_best)
+
+# Fit a LASSO regression model
+lasso_model <- glmnet(X, y, alpha = 1, lambda = 0.1)
+coef(lasso_model)
+
+# Perform cross-validation to select lambda
+cv_lasso <- cv.glmnet(X, y, alpha = 1)
+plot(cv_lasso$glmnet.fit, xvar = "lambda", label = TRUE)
+
+best_lambda_lasso <- cv_lasso$lambda.min
+lasso_model_best <- glmnet(X, y, alpha = 1, lambda = best_lambda_lasso)
+coef(lasso_model_best)
+```
+
+## Model Comparison
+
+When considering these models, one way to consider which model is best is to compare the AIC and BIC values, and the RMSE values.
+
+```{r}
+# install.packages("Metrics")
+# install.packages("caret")
+library(Metrics)
+library(caret) 
+
+# Test sets
+X_test2 <- as.matrix(test[, c(
+  "X..of.Incidents.Calculated",
+  "Call.to.First.Pickup",
+  "Call.to.PD.Calltaker.Handoff",
+  "Call.to.Agency.Dispatch",
+  "Median.Pickup",
+  "Median.Calltaker.Handoff",
+  "Median.Dispatch",
+  "Average.Calltaker.Processing"
+)])
+
+y_test <- test$Call.to.Agency.Arrival
+dummy_inc_test <- cbind(X_test2, dummy_test)
+
+# Predict with GLM on the test set
+predictions <- predict(glm_gamma, newdata = test, type = "response")
+
+# Make predictions with the best Ridge model
+pred_ridge_test <- predict(ridge_model_best, newx = dummy_inc_test)
+
+# Make predictions with the best Lasso model
+pred_lasso_test <- predict(lasso_model_best, newx = dummy_inc_test)
+
+# Calculate RMSE for all models
+rmse_gamma <- rmse(test$Call.to.Agency.Arrival, predictions)
+rmse_ridge <- rmse(y_test, pred_ridge_test)
+rmse_lasso <- rmse(y_test, pred_lasso_test)
+
+# Comparing model metrics
+aic_gamma<- AIC(glm_gamma)
+bic_gamma<- BIC(glm_gamma)
+
+# Function to calculate AIC and BIC for glmnet models
+calculate_AIC_BIC <- function(model, X, y) {
+  # Predicted values from the model
+  pred <- predict(model, newx = X)
+  
+  # Calculate residual sum of squares (RSS)
+  rss <- sum((y - pred)^2)
+  
+  # Number of observations and number of coefficients
+  n <- length(y)
+  k <- sum(coef(model) != 0) # Number of non-zero coefficients
+  
+  # Calculate AIC and BIC
+  aic <- n * log(rss / n) + 2 * k
+  bic <- n * log(rss / n) + log(n) * k
+  
+  return(list(AIC = aic, BIC = bic))
+}
+# Calculate AIC and BIC for Ridge
+ridge_metrics <- calculate_AIC_BIC(ridge_model_best, X, y)
+print(ridge_metrics)
+
+# Calculate AIC and BIC for LASSO
+lasso_metrics <- calculate_AIC_BIC(lasso_model_best, X, y)
+print(lasso_metrics)
+
+# Create a data frame to hold the results
+results_table <- data.frame(
+  Model = c("GLM Gamma", "Ridge", "Lasso"),
+  AIC = c(aic_gamma, ridge_metrics$AIC, lasso_metrics$AIC),
+  BIC = c(bic_gamma, ridge_metrics$BIC, lasso_metrics$BIC),
+  RMSE = c(rmse_gamma, rmse_ridge, rmse_lasso)
+)
+print(results_table)
+```
+
+Using the table above, it can be said that for this particular data set, the LASSO regression model is the best option. A visual representation of this can be seen from the graphs below as well.
+
+```{r}
+# Plot Predicted vs Actual values for GLM
+plot(test$Call.to.Agency.Arrival, predictions,
+     main = "GLM: Predicted vs Actual",
+     xlab = "Actual",
+     ylab = "Predicted",
+     col = "purple",
+     pch = 16)
+# Add identity line
+abline(0, 1, col = "black", lwd=3)
+
+# Plot Predicted vs Actual values for Ridge
+plot(
+  y_test,
+  pred_ridge_test,
+  main = "Ridge: Predicted vs Actual",
+  xlab = "Actual",
+  ylab = "Predicted",
+  col = "purple",
+  pch=16)
+# Add identity line
+abline(0, 1, col = "black", lwd=3) 
+
+# Plot Predicted vs Actual values for LASSO
+plot(
+  y_test,
+  pred_lasso_test,
+  main = "LASSO: Predicted vs Actual",
+  xlab = "Actual",
+  ylab = "Predicted",
+  col = "purple",
+  pch=16)
+# Add identity line
+abline(0, 1, col = "black", lwd=3) 
+```
+
+## Conclusion
+
+Using the AIC value as the main indicator, the final model choice would be the LASSO regression model. LASSO regression is able to minimize independent variables that are not important. Below is included a visual of the features included in the LASSO regression model in order of their importance from most to least as indicated by the bar graph. Feature importance was also created for the GLM model since it handles the variables differently.
+
+```{r}
+# Feature importance (via coefficients)
+coefficients <- summary(glm_gamma)$coefficients[, 1]
+cat("Feature Importance:")
+
+# Create a data frame for the coefficients
+importance_df <- data.frame(
+  feature = names(coefficients),
+  importance = abs(coefficients)
+)
+# Sort the importance in descending order
+importance_df <- importance_df[order(importance_df$importance,
+                                     decreasing = TRUE), ]
+# Plot GLM feature importance
+ggplot(importance_df, aes(x = reorder(feature, importance), y = importance)) +
+  geom_bar(stat = "identity", fill = "purple") +
+  coord_flip() +
+  labs(
+    title = "GLM (Gamma) Feature Importance",
+    x = "Feature",
+    y = "Importance (Absolute Coefficient Value)"
+  ) +
+  theme_minimal()
+
+# Feature Importance for LASSO regression
+# Get coefficients
+coef_lasso <- coef(lasso_model_best)
+
+# Convert to tidy data frame
+coef_df <- as.data.frame(as.matrix(coef_lasso))
+coef_df$Feature <- rownames(coef_df)
+colnames(coef_df)[1] <- "Coefficient"
+
+# Remove intercept and zero coefficients
+coef_df <- coef_df[coef_df$Feature != "(Intercept)" & 
+                     coef_df$Coefficient != 0, ]
+
+# Plot LASSO feature importance
+ggplot(coef_df, 
+       aes(x = reorder(Feature, abs(Coefficient)),
+           y = abs(Coefficient))) +
+  geom_bar(stat = "identity", fill = "purple") +
+  coord_flip() +
+  labs(title = "LASSO Feature Importance",
+       x = "Feature",
+       y = "Importance (Absolute Coefficient Value)") +
+  theme_minimal()
+```
